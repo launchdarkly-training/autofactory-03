@@ -8,11 +8,11 @@
  */
 
 import express from "express";
+import { pathToFileURL } from "node:url";
 
 const SHA = process.env.RAILWAY_GIT_COMMIT_SHA || "dev";
 const BACKEND_URL = process.env.BACKEND_URL || "http://localhost:8000";
 const SDK_KEY = process.env.LD_SDK_KEY;
-const app = express();
 
 const FLAG_BACKEND_STATUS = "enable-backend-status";
 const LD_CONTEXT = { kind: "user", key: "demo-user" };
@@ -58,7 +58,7 @@ export async function flagVariation(key, defaultValue = "control") {
  * written out literally so they stay greppable and match the LaunchDarkly
  * metrics. Telemetry failures are swallowed — they must never fail a request.
  */
-async function trackBackendStatus({ ok, durationMs }) {
+export async function trackBackendStatus({ ok, durationMs }) {
   try {
     const client = await ldClient();
     if (!client) return;
@@ -116,23 +116,36 @@ export function renderPage({ showBackendStatus }) {
 </body></html>`;
 }
 
-app.get("/api/status", (_req, res) => {
-  res.json({ service: "demo-frontend", version: SHA });
-});
+export function createApp({
+  resolveVariation = flagVariation,
+  track = trackBackendStatus,
+} = {}) {
+  const app = express();
 
-app.post("/api/backend-status-report", express.json(), (req, res) => {
-  const { ok, ms } = req.body || {};
-  trackBackendStatus({ ok: ok === true, durationMs: Number(ms) });
-  res.status(204).end();
-});
+  app.get("/api/status", (_req, res) => {
+    res.json({ service: "demo-frontend", version: SHA });
+  });
 
-app.get("/", async (_req, res) => {
-  const variation = await flagVariation(FLAG_BACKEND_STATUS, "control");
-  res.type("html").send(renderPage({ showBackendStatus: variation === "v1" }));
-});
+  app.post("/api/backend-status-report", express.json(), (req, res) => {
+    const { ok, ms } = req.body || {};
+    track({ ok: ok === true, durationMs: Number(ms) });
+    res.status(204).end();
+  });
+
+  app.get("/", async (_req, res) => {
+    const variation = await resolveVariation(FLAG_BACKEND_STATUS, "control");
+    res.type("html").send(renderPage({ showBackendStatus: variation === "v1" }));
+  });
+
+  return app;
+}
+
+const app = createApp();
 
 const port = process.env.PORT || 3000;
-if (process.env.NODE_ENV !== "test") {
+const isEntryPoint =
+  process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (isEntryPoint) {
   app.listen(port, () => console.log(`demo-frontend on :${port}`));
 }
 
