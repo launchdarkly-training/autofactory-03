@@ -53,6 +53,28 @@ export async function flagVariation(key, defaultValue = "control") {
   }
 }
 
+/**
+ * Emit the guarded-release events for the backend status panel. Event keys are
+ * written out literally so they stay greppable and match the LaunchDarkly
+ * metrics. Telemetry failures are swallowed — they must never fail a request.
+ */
+async function trackBackendStatus({ ok, durationMs }) {
+  try {
+    const client = await ldClient();
+    if (!client) return;
+    if (ok) {
+      client.track("enable-backend-status-success", LD_CONTEXT);
+    } else {
+      client.track("enable-backend-status-error", LD_CONTEXT);
+    }
+    if (Number.isFinite(durationMs)) {
+      client.track("enable-backend-status-latency", LD_CONTEXT, undefined, durationMs);
+    }
+  } catch {
+    // telemetry is best-effort
+  }
+}
+
 export function renderPage({ showBackendStatus }) {
   const backendStatusMarkup = showBackendStatus
     ? `
@@ -60,11 +82,22 @@ export function renderPage({ showBackendStatus }) {
     : "";
   const backendStatusScript = showBackendStatus
     ? `
+    const backendStatusStart = Date.now();
+    const reportBackendStatus = (ok) => {
+      try {
+        fetch("/api/backend-status-report", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          keepalive: true,
+          body: JSON.stringify({ ok, ms: Date.now() - backendStatusStart }),
+        }).catch(() => {});
+      } catch (e) {}
+    };
     fetch("${BACKEND_URL}/api/status")
       .then(r => r.json())
       .then(d => { document.getElementById("backend-status").textContent =
-        "Backend online: " + d.service + " version " + d.version; })
-      .catch(() => { document.getElementById("backend-status").textContent = "Backend offline"; });`
+        "Backend online: " + d.service + " version " + d.version; reportBackendStatus(true); })
+      .catch(() => { document.getElementById("backend-status").textContent = "Backend offline"; reportBackendStatus(false); });`
     : "";
 
   return `<!doctype html>
@@ -85,6 +118,12 @@ export function renderPage({ showBackendStatus }) {
 
 app.get("/api/status", (_req, res) => {
   res.json({ service: "demo-frontend", version: SHA });
+});
+
+app.post("/api/backend-status-report", express.json(), (req, res) => {
+  const { ok, ms } = req.body || {};
+  trackBackendStatus({ ok: ok === true, durationMs: Number(ms) });
+  res.status(204).end();
 });
 
 app.get("/", async (_req, res) => {
